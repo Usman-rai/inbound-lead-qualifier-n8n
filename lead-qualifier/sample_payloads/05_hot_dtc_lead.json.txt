@@ -1,7 +1,0 @@
-{
-  "name": "David Kim",
-  "email": "david@kim-apparel.co",
-  "company": "Kim Apparel Co",
-  "source": "Referral",
-  "message": "DTC ecommerce brand, $400k/month on Shopify. Paid social ROAS dropped from 3.2 to 1.8 in Q2. Need an agency that knows DTC. Starting by month-end. Budget $12-15k/month."
-}

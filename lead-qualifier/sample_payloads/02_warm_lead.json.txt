@@ -1,7 +1,0 @@
-{
-  "name": "Marcus Doyle",
-  "email": "marcus@doyle-consulting.com",
-  "company": "Doyle Consulting",
-  "source": "Website",
-  "message": "Looking to improve our marketing. Can you send pricing?"
-}
