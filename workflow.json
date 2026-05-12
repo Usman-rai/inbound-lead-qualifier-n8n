@@ -1,0 +1,580 @@
+{
+  "name": "Inbound Lead Qualifier",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-intake",
+        "options": {
+          "responseCode": {
+            "values": {}
+          },
+          "responseData": "Acknowledged"
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -32,
+        0
+      ],
+      "id": "8f3ca369-38a0-4d59-a840-d9ce2c42ecea",
+      "name": "Webhook",
+      "webhookId": "REPLACE_WITH_YOUR_WEBHOOK_ID"
+    },
+    {
+      "parameters": {
+        "jsCode": "var raw = $input.item.json;\n\n// Webhook wraps form data in `body`. Handle both shapes safely.\nvar d = raw.body || raw;\n\nvar email = String(d.email || '').toLowerCase().trim();\nvar domain = email.split('@')[1] || '';\n\nvar freeProviders = ['gmail.com','yahoo.com','hotmail.com','outlook.com','icloud.com','proton.me','aol.com'];\nvar isFreemail = freeProviders.indexOf(domain) >= 0;\n\nvar out = {\n  name: d.name || '',\n  email: email,\n  company: d.company || '',\n  message: d.message || '',\n  source: d.source || 'Website',\n  domain: domain,\n  isFreemail: isFreemail,\n  submittedAt: new Date().toISOString()\n};\nreturn { json: out };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        0
+      ],
+      "id": "1e43a09c-25ed-4c4c-a834-a44588be1e05",
+      "name": "Extract Domain"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_GROQ_API_KEY_HERE"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"temperature\": 0.2,\n  \"max_tokens\": 400,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a senior sales qualifier for a B2B marketing agency that takes on clients with $5k+/month retainers. You score inbound leads from 0-100 based on fit, intent, and timing. You output ONLY valid JSON, no prose.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"LEAD:\\nName: {{ $json.name }}\\nEmail: {{ $json.email }}\\nFreemail address: {{ $json.isFreemail }}\\nCompany: {{ $json.company }}\\nDomain: {{ $json.domain }}\\nCompany size: {{ $json.companySize }}\\nIndustry: {{ $json.industry }}\\nSource: {{ $json.source }}\\n\\nMESSAGE:\\n{{ $json.message }}\\n\\nSCORING CRITERIA:\\n\\n(1) Fit (0-40 points)\\n- Company size 11-200: +30\\n- Company size 200+: +25 (bigger but harder sales cycle)\\n- Company size 1-10 or unknown: +10\\n- Freemail email address: -15\\n- B2B industry mentioned (SaaS, ecom, agency, consulting): +10\\n\\n(2) Intent (0-40 points)\\n- Specific budget mentioned: +20\\n- Specific service requested: +15\\n- Vague 'help with marketing' message: +5\\n- One-line message with no detail: 0\\n- Spammy / off-topic / asking for free work: -30\\n\\n(3) Timing (0-20 points)\\n- Mentions specific start date or quarter: +20\\n- 'ASAP' or 'urgent': +15\\n- 'Exploring options' / 'researching': +10\\n- No timing signal: +5\\n\\nTIER ASSIGNMENT:\\n- 75-100: HOT — notify sales lead in Slack immediately\\n- 50-74: WARM — add to nurture, sales reviews tomorrow\\n- 20-49: COLD — auto-reply with case studies, no human follow-up\\n- 0-19: SPAM — archive\\n\\nOUTPUT exactly:\\n{\\\"score\\\":75,\\\"tier\\\":\\\"HOT\\\",\\\"reasoning\\\":\\\"<2-3 sentences citing SPECIFIC details from the message and lead data — never invent details>\\\",\\\"reply_subject\\\":\\\"<personalized email subject>\\\",\\\"reply_body\\\":\\\"<3-4 sentence personalized reply, friendly, references their actual situation, ends with a calendly-style next step>\\\"}\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        464,
+        0
+      ],
+      "id": "f947bccb-8bfb-4b39-85be-078a31ce79af",
+      "name": "AI Score Lead"
+    },
+    {
+      "parameters": {
+        "jsCode": "var raw = $input.item.json;\nvar lead = $('Extract Domain').item.json;\n\nvar score = 0;\nvar tier = 'Cold';\nvar reasoning = '';\nvar replySubject = '';\nvar replyBody = '';\n\ntry {\n  var txt = raw.choices[0].message.content;\n  var cleaned = txt.replace(/```json/g, '').replace(/```/g, '').trim();\n  var s = cleaned.indexOf('{');\n  var e = cleaned.lastIndexOf('}');\n  if (s >= 0 && e > s) {\n    var ai = JSON.parse(cleaned.substring(s, e + 1));\n    score = Number(ai.score) || 0;\n    tier = String(ai.tier || 'COLD');\n    reasoning = ai.reasoning || '';\n    replySubject = ai.reply_subject || '';\n    replyBody = ai.reply_body || '';\n  }\n} catch (err) {\n  reasoning = 'parse error: ' + err.message;\n}\n\n// Normalize tier to match Airtable single-select capitalization\nvar tierMap = { HOT: 'Hot', WARM: 'Warm', COLD: 'Cold', SPAM: 'Spam' };\nvar tierClean = tierMap[tier.toUpperCase()] || 'Cold';\n\n// Build output: lead data + AI scoring fields\nvar out = Object.assign({}, lead);\nout.score = score;\nout.tier = tierClean;\nout.reasoning = reasoning;\nout.replySubject = replySubject;\nout.replyBody = replyBody;\nout.aiSource = 'groq';\n\nreturn { json: out };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ],
+      "id": "ad4d99ce-2f07-4d97-b566-9b1a548be0a1",
+      "name": "Parse AI Response"
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "base": {
+          "__rl": true,
+          "value": "YOUR_AIRTABLE_BASE_ID",
+          "mode": "list",
+          "cachedResultName": "Inbound Lead Qualifier",
+          "cachedResultUrl": ""
+        },
+        "table": {
+          "__rl": true,
+          "value": "YOUR_AIRTABLE_TABLE_ID",
+          "mode": "list",
+          "cachedResultName": "Leads",
+          "cachedResultUrl": ""
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Slack Notified": false,
+            "Name": "={{ $json.name }}",
+            "Email": "={{ $json.email }}",
+            "Company": "={{ $json.company }}",
+            "Message": "={{ $json.message }}",
+            "Company Domain": "={{ $json.domain }}",
+            "Reasoning": "={{ $json.reasoning }}",
+            "Tier": "={{ $json.tier }}",
+            "Score": "={{ $json.score }}",
+            "Submitted At": "={{ $json.submittedAt }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Name",
+              "displayName": "Name",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Email",
+              "displayName": "Email",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Company",
+              "displayName": "Company",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Company Domain",
+              "displayName": "Company Domain",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Message",
+              "displayName": "Message",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Lead Source",
+              "displayName": "Lead Source",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                { "name": "Website", "value": "Website" },
+                { "name": "LinkedIn", "value": "LinkedIn" },
+                { "name": "Referral", "value": "Referral" },
+                { "name": "Cold Outreach", "value": "Cold Outreach" },
+                { "name": "Other", "value": "Other" }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Score",
+              "displayName": "Score",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Tier",
+              "displayName": "Tier",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                { "name": "Hot", "value": "Hot" },
+                { "name": "Warm", "value": "Warm" },
+                { "name": "Cold", "value": "Cold" },
+                { "name": "Spam", "value": "Spam" }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Reasoning",
+              "displayName": "Reasoning",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                { "name": "New", "value": "New" },
+                { "name": "Contacted", "value": "Contacted" },
+                { "name": "Qualified", "value": "Qualified" },
+                { "name": "Disqualified", "value": "Disqualified" },
+                { "name": "Closed Won", "value": "Closed Won" },
+                { "name": "Closed Lost", "value": "Closed Lost" }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Submitted At",
+              "displayName": "Submitted At",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Slack Notified",
+              "displayName": "Slack Notified",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "boolean",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        928,
+        0
+      ],
+      "id": "c9d3717e-f59e-4859-8090-d18e10e72549",
+      "name": "Create Lead Record",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "REPLACE_WITH_YOUR_AIRTABLE_CREDENTIAL_ID",
+          "name": "Airtable Personal Access Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "5f86b97a-5d59-4363-a149-80ca44d84e51",
+              "leftValue": "={{ $('Parse AI Response').item.json.tier }}",
+              "rightValue": "Hot",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1152,
+        0
+      ],
+      "id": "667c1408-c594-4dee-b5af-488a62e3c7d3",
+      "name": "Is Hot Lead?"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_SLACK_CHANNEL_ID_LEADS_HOT",
+          "mode": "list",
+          "cachedResultName": "leads-hot"
+        },
+        "text": "=🔥 *HOT LEAD — Score {{ $('Parse AI Response').item.json.score }}*\n\n*{{ $('Parse AI Response').item.json.name }}* from *{{ $('Parse AI Response').item.json.company }}*\n📧 {{ $('Parse AI Response').item.json.email }}\n\n*Message:*\n> {{ $('Parse AI Response').item.json.message }}\n\n*Why it's hot:* {{ $('Parse AI Response').item.json.reasoning }}",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        1456,
+        -96
+      ],
+      "id": "5be57417-ccb6-48d0-a6f7-dec5c3bc35fa",
+      "name": "Slack: Hot Lead Alert",
+      "webhookId": "REPLACE_WITH_YOUR_WEBHOOK_ID",
+      "credentials": {
+        "slackApi": {
+          "id": "REPLACE_WITH_YOUR_SLACK_CREDENTIAL_ID",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_SLACK_CHANNEL_ID_LEADS_ALL",
+          "mode": "list",
+          "cachedResultName": "leads-all"
+        },
+        "text": "=New lead • {{ $('Parse AI Response').item.json.tier }} • Score {{ $('Parse AI Response').item.json.score }} — {{ $('Parse AI Response').item.json.name }} ({{ $('Parse AI Response').item.json.company }}) — {{ $('Parse AI Response').item.json.email }}",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        1456,
+        96
+      ],
+      "id": "b11c301e-4405-4687-94ba-1b1a35846cd3",
+      "name": "Slack: All Leads Log",
+      "webhookId": "REPLACE_WITH_YOUR_WEBHOOK_ID",
+      "credentials": {
+        "slackApi": {
+          "id": "REPLACE_WITH_YOUR_SLACK_CREDENTIAL_ID",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "bb6faa9e-c2dc-43a6-af65-7ecdb4015b01",
+              "leftValue": "={{ $('Parse AI Response').item.json.tier }}",
+              "rightValue": "Spam",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1664,
+        96
+      ],
+      "id": "32a10bf0-aec0-411a-9b85-d45e2c54497e",
+      "name": "Is Not Spam?"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('Parse AI Response').item.json.email }}",
+        "subject": "={{ $('Parse AI Response').item.json.replySubject }}",
+        "emailType": "text",
+        "message": "={{ $('Parse AI Response').item.json.replyBody }}",
+        "options": {
+          "senderName": "Northbeam Studio"
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1664,
+        -96
+      ],
+      "id": "5cac7313-e5d4-4ace-9110-8baea31c429a",
+      "name": "Gmail: Hot Reply",
+      "webhookId": "REPLACE_WITH_YOUR_WEBHOOK_ID",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_YOUR_GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('Parse AI Response').item.json.email }}",
+        "subject": "={{ $('Parse AI Response').item.json.replySubject }}",
+        "emailType": "text",
+        "message": "={{ $('Parse AI Response').item.json.replyBody }}",
+        "options": {
+          "senderName": "Northbeam Studio"
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1952,
+        80
+      ],
+      "id": "669230db-22aa-424c-8138-3a3738371767",
+      "name": "Gmail: Auto Reply",
+      "webhookId": "REPLACE_WITH_YOUR_WEBHOOK_ID",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_YOUR_GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Extract Domain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Domain": {
+      "main": [
+        [
+          {
+            "node": "AI Score Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Score Lead": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Response": {
+      "main": [
+        [
+          {
+            "node": "Create Lead Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Lead Record": {
+      "main": [
+        [
+          {
+            "node": "Is Hot Lead?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Hot Lead?": {
+      "main": [
+        [
+          {
+            "node": "Slack: Hot Lead Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack: All Leads Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: Hot Lead Alert": {
+      "main": [
+        [
+          {
+            "node": "Gmail: Hot Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: All Leads Log": {
+      "main": [
+        [
+          {
+            "node": "Is Not Spam?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Not Spam?": {
+      "main": [
+        [
+          {
+            "node": "Gmail: Auto Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "tags": []
+}
